@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ dc.name or dc.id }} · IP 관리 포탈{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div class="crumbs"><a href="{{ url_for('dashboard') }}">대시보드</a> / {{ dc.id }}</div>
+  <h1>{{ dc.name or dc.id }}</h1>
+  <p class="muted">
+    {{ dc.location or '' }} ·
+    서브넷: {{ dc.subnets | join(', ') if dc.subnets else '—' }} ·
+    마지막 스캔: <span class="ts" data-ts="{{ dc.last_scan_finished or '' }}">{{ dc.last_scan_finished or '—' }}</span>
+  </p>
+</section>
+
+<section class="stats">
+  <div class="stat-card">
+    <div class="stat-value">{{ dc.host_count }}</div>
+    <div class="stat-label">사용중 IP</div>
+  </div>
+  <div class="stat-card stat-wide">
+    <div class="stat-label">OS 분포</div>
+    <div class="os-bars">
+      {% for o in os_breakdown %}
+        <span class="os-chip" data-family="{{ o.os_family }}">{{ o.os_family }} <b>{{ o.count }}</b></span>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>호스트 인벤토리</h2>
+    <div class="filters">
+      <input type="search" id="f-q" placeholder="IP / 호스트명 / OS 검색">
+      <select id="f-os"><option value="">전체 OS</option></select>
+      <span class="muted" id="host-count"></span>
+    </div>
+  </div>
+  <table class="grid hosts">
+    <thead>
+      <tr>
+        <th>IP 주소</th><th>호스트명</th><th>OS</th><th>정확도</th>
+        <th>Uptime</th><th>마지막 부팅</th><th>열린 포트</th><th>서브넷</th>
+      </tr>
+    </thead>
+    <tbody id="host-rows">
+      <tr><td colspan="8" class="empty">불러오는 중…</td></tr>
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>window.DC_ID = {{ dc.id | tojson }};</script>
+<script src="{{ url_for('static', filename='js/common.js') }}"></script>
+<script src="{{ url_for('static', filename='js/datacenter.js') }}"></script>
+{% endblock %}
