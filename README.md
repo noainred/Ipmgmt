@@ -31,10 +31,10 @@
 | 경로 | 역할 |
 |------|------|
 | `collector/scanner.py`   | nmap 래퍼. 서브넷 스캔 → OS/호스트명/uptime/포트 추출 (+데모 모드) |
-| `collector/collector.py` | DC 안에서 주기적으로 스캔 후 포탈로 push |
-| `portal/app.py`          | Flask: ingest API + 조회 API + 웹 UI |
-| `portal/database.py`     | SQLite 저장소 (datacenters, hosts) |
-| `portal/templates/`,`static/` | 대시보드 / DC 상세 웹 페이지 |
+| `collector/collector.py` | DC 안에서 주기적으로 스캔 후 포탈로 push. **설정(서브넷·주기)은 포탈에서 pull** |
+| `portal/app.py`          | Flask: ingest API + 조회 API + **설정 API** + 웹 UI |
+| `portal/database.py`     | SQLite 저장소 (datacenters, hosts, **dc_config**) |
+| `portal/templates/`,`static/` | 대시보드 / DC 상세 / **설정** 웹 페이지 |
 | `common/hostrecord.py`   | collector·portal 공용 호스트 레코드 스키마 |
 
 ---
@@ -58,7 +58,8 @@ pip install -r requirements.txt
 
 ```bash
 pip install Flask
-export INGEST_API_KEY="강력한-공유키"        # collector 인증용
+export INGEST_API_KEY="강력한-공유키"        # collector 인증용 (ingest/config pull)
+export ADMIN_TOKEN="강력한-관리자토큰"        # 웹 설정 페이지 쓰기 권한
 export PORTAL_DB="/var/lib/ipmgmt/portal.db"
 export PORT=8000
 python -m portal.app
@@ -112,6 +113,37 @@ WantedBy=multi-user.target
 
 ---
 
+## 웹에서 설정 관리 (`/settings`)
+
+각 DC 호스트의 `config.json` 을 일일이 편집할 필요 없이, **포탈 웹의 설정 페이지에서
+데이터센터별 스캔 대상 서브넷과 주기를 관리**합니다. 포탈이 설정의 단일 소스(source of
+truth)가 되고, collector는 자기 DC의 설정을 포탈에서 **pull** 해서 스캔합니다.
+
+흐름:
+
+1. 포탈 `/settings` 접속 → **Admin Token**(`ADMIN_TOKEN`) 입력해 잠금 해제
+   (토큰은 브라우저 localStorage에만 저장되고 서버 페이지에 포함되지 않음)
+2. **데이터센터 추가/편집**: id, 이름, 위치, 서브넷(여러 개), 스캔주기(초), 사용 여부
+3. 각 DC의 collector는 `use_remote_config: true`(기본값)면 매 스캔 전에
+   `GET /api/v1/config/<dc_id>` 로 설정을 받아 적용
+   * `enabled=false` 면 스캔을 건너뜀
+   * 포탈에 설정이 없거나 접속 불가면 로컬 `config.json` 의 subnets로 폴백
+4. 설정만 하고 아직 스캔 전인 DC는 대시보드에 **“대기중(수집 전)”** 으로 표시
+
+즉, 신규 DC를 늘릴 때 운영자는 collector를 `--dc <id> --portal <url> --api-key <key>`
+세 가지만으로 띄우고, **나머지는 웹에서** 지정하면 됩니다.
+
+### 설정 API
+
+| 메서드 | 경로 | 인증 | 설명 |
+|--------|------|------|------|
+| GET    | `/api/v1/config` | Admin 또는 API-Key | DC 설정 목록 |
+| GET    | `/api/v1/config/<id>` | Admin 또는 API-Key | 단일 DC 설정 (collector가 pull) |
+| PUT/POST | `/api/v1/config/<id>` | **Admin** (`X-Admin-Token`) | 설정 생성/수정 (CIDR 검증) |
+| DELETE | `/api/v1/config/<id>` | **Admin** | 설정 삭제 (수집된 호스트 데이터는 유지) |
+
+---
+
 ## 수집 정보
 
 각 사용중 IP에 대해 다음을 수집/표시합니다.
@@ -136,7 +168,8 @@ WantedBy=multi-user.target
 | GET  | `/api/v1/stats` | 전체 DC 수 / IP 수 / OS 분포 |
 | GET  | `/api/v1/datacenters` | DC 목록 + 요약 |
 | GET  | `/api/v1/hosts?dc=&os_family=&subnet=&q=&limit=&offset=` | 호스트 조회/필터 |
-| GET  | `/` , `/dc/<id>` | 웹 대시보드 / DC 상세 |
+| GET/PUT/DELETE | `/api/v1/config[/<id>]` | DC 설정 조회/수정 (위 “웹에서 설정 관리” 참고) |
+| GET  | `/` , `/dc/<id>` , `/settings` | 웹 대시보드 / DC 상세 / 설정 |
 | GET  | `/healthz` | 헬스체크 |
 
 ### ingest 페이로드 예시

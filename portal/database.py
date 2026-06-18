@@ -67,6 +67,19 @@ CREATE INDEX IF NOT EXISTS idx_hosts_dc       ON hosts(datacenter_id);
 CREATE INDEX IF NOT EXISTS idx_hosts_family   ON hosts(os_family);
 CREATE INDEX IF NOT EXISTS idx_hosts_subnet   ON hosts(subnet);
 CREATE INDEX IF NOT EXISTS idx_hosts_lastseen ON hosts(last_seen);
+
+-- Desired configuration, managed from the web Settings page. This is the
+-- source of truth that collectors pull from (separate from the observed
+-- `datacenters` state that ingest writes).
+CREATE TABLE IF NOT EXISTS dc_config (
+    id            TEXT PRIMARY KEY,
+    name          TEXT,
+    location      TEXT,
+    subnets       TEXT,        -- JSON array of CIDRs to scan
+    scan_interval_seconds INTEGER DEFAULT 900,
+    enabled       INTEGER DEFAULT 1,
+    updated_at    TEXT
+);
 """
 
 
@@ -268,3 +281,101 @@ def global_stats(conn: sqlite3.Connection) -> dict:
         "hosts": total_hosts,
         "os_breakdown": os_family_breakdown(conn),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Datacenter configuration (managed from the web Settings page)
+# --------------------------------------------------------------------------- #
+def _row_to_config(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    try:
+        d["subnets"] = json.loads(d.get("subnets") or "[]")
+    except (TypeError, ValueError):
+        d["subnets"] = []
+    d["enabled"] = bool(d.get("enabled", 1))
+    return d
+
+
+def list_configs(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM dc_config ORDER BY id").fetchall()
+    return [_row_to_config(r) for r in rows]
+
+
+def get_config(conn: sqlite3.Connection, dc_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM dc_config WHERE id=?", (dc_id,)).fetchone()
+    return _row_to_config(row) if row else None
+
+
+def upsert_config(
+    conn: sqlite3.Connection,
+    dc_id: str,
+    *,
+    name: str | None = None,
+    location: str | None = None,
+    subnets: list[str] | None = None,
+    scan_interval_seconds: int = 900,
+    enabled: bool = True,
+) -> dict:
+    now = _now_iso()
+    with _LOCK:
+        conn.execute(
+            """
+            INSERT INTO dc_config (id, name, location, subnets,
+                                   scan_interval_seconds, enabled, updated_at)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                location=excluded.location,
+                subnets=excluded.subnets,
+                scan_interval_seconds=excluded.scan_interval_seconds,
+                enabled=excluded.enabled,
+                updated_at=excluded.updated_at
+            """,
+            (
+                dc_id,
+                name,
+                location,
+                json.dumps(subnets or []),
+                int(scan_interval_seconds),
+                1 if enabled else 0,
+                now,
+            ),
+        )
+        conn.commit()
+    return get_config(conn, dc_id)
+
+
+def delete_config(conn: sqlite3.Connection, dc_id: str) -> bool:
+    with _LOCK:
+        cur = conn.execute("DELETE FROM dc_config WHERE id=?", (dc_id,))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def datacenters_overview(conn: sqlite3.Connection) -> list[dict]:
+    """Merge desired config with observed state for the dashboard.
+
+    A datacenter may be configured but not yet reported (pending), reported but
+    not configured (e.g. ad-hoc collector run), or both.
+    """
+    configs = {c["id"]: c for c in list_configs(conn)}
+    observed = {d["id"]: d for d in list_datacenters(conn)}
+    out = []
+    for dc_id in sorted(set(configs) | set(observed)):
+        c = configs.get(dc_id)
+        o = observed.get(dc_id)
+        subnets = (o.get("subnets") if o and o.get("subnets") else
+                   (c.get("subnets") if c else [])) or []
+        out.append({
+            "id": dc_id,
+            "name": (o and o.get("name")) or (c and c.get("name")) or dc_id,
+            "location": (o and o.get("location")) or (c and c.get("location")),
+            "subnets": subnets,
+            "host_count": (o or {}).get("host_count", 0),
+            "last_seen": (o or {}).get("last_seen"),
+            "last_scan_finished": (o or {}).get("last_scan_finished"),
+            "enabled": (c.get("enabled", True) if c else True),
+            "configured": c is not None,
+            "reported": o is not None,
+        })
+    return out

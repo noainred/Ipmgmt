@@ -29,6 +29,8 @@ from portal import database as db
 
 DB_PATH = os.environ.get("PORTAL_DB", "portal.db")
 INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "change-me-shared-ingest-key")
+# Separate token that gates write access to the web Settings page / config API.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "change-me-admin-token")
 
 app = Flask(__name__)
 
@@ -47,13 +49,25 @@ def get_conn():
 app.jinja_env.filters["uptime"] = format_uptime
 
 
+def _is_admin() -> bool:
+    return request.headers.get("X-Admin-Token", "") == ADMIN_TOKEN
+
+
+def _is_collector() -> bool:
+    return request.headers.get("X-API-Key", "") == INGEST_API_KEY
+
+
+def _require_admin():
+    if not _is_admin():
+        abort(401, description="invalid or missing X-Admin-Token")
+
+
 # --------------------------------------------------------------------------- #
 # Ingest API
 # --------------------------------------------------------------------------- #
 @app.post("/api/v1/ingest")
 def ingest():
-    key = request.headers.get("X-API-Key", "")
-    if key != INGEST_API_KEY:
+    if not _is_collector():
         abort(401, description="invalid or missing X-API-Key")
 
     payload = request.get_json(silent=True)
@@ -92,7 +106,77 @@ def api_stats():
 
 @app.get("/api/v1/datacenters")
 def api_datacenters():
-    return jsonify({"datacenters": db.list_datacenters(get_conn())})
+    return jsonify({"datacenters": db.datacenters_overview(get_conn())})
+
+
+# --------------------------------------------------------------------------- #
+# Configuration API (web Settings page writes; collectors pull their config)
+# --------------------------------------------------------------------------- #
+@app.get("/api/v1/config")
+def api_config_list():
+    # Visible to admins (Settings UI) and collectors; subnets are not secret
+    # (already shown on the dashboard) but writes are gated below.
+    if not (_is_admin() or _is_collector()):
+        abort(401, description="X-Admin-Token or X-API-Key required")
+    return jsonify({"configs": db.list_configs(get_conn())})
+
+
+@app.get("/api/v1/config/<dc_id>")
+def api_config_get(dc_id):
+    # Primary consumer: the collector pulling its own scan config.
+    if not (_is_admin() or _is_collector()):
+        abort(401, description="X-Admin-Token or X-API-Key required")
+    cfg = db.get_config(get_conn(), dc_id)
+    if not cfg:
+        abort(404, description=f"no config for datacenter: {dc_id}")
+    return jsonify(cfg)
+
+
+@app.put("/api/v1/config/<dc_id>")
+@app.post("/api/v1/config/<dc_id>")
+def api_config_upsert(dc_id):
+    _require_admin()
+    body = request.get_json(silent=True) or {}
+    subnets = body.get("subnets") or []
+    if isinstance(subnets, str):
+        subnets = [s.strip() for s in subnets.replace("\n", ",").split(",") if s.strip()]
+    # Validate each CIDR before saving so the collector never gets junk.
+    import ipaddress
+    bad = []
+    norm = []
+    for cidr in subnets:
+        try:
+            norm.append(str(ipaddress.ip_network(cidr, strict=False)))
+        except ValueError:
+            bad.append(cidr)
+    if bad:
+        abort(400, description=f"invalid subnet(s): {', '.join(bad)}")
+
+    try:
+        interval = int(body.get("scan_interval_seconds", 900))
+    except (TypeError, ValueError):
+        abort(400, description="scan_interval_seconds must be an integer")
+    if interval < 30:
+        abort(400, description="scan_interval_seconds must be >= 30")
+
+    cfg = db.upsert_config(
+        get_conn(), dc_id,
+        name=(body.get("name") or "").strip() or None,
+        location=(body.get("location") or "").strip() or None,
+        subnets=norm,
+        scan_interval_seconds=interval,
+        enabled=bool(body.get("enabled", True)),
+    )
+    return jsonify(cfg), 200
+
+
+@app.delete("/api/v1/config/<dc_id>")
+def api_config_delete(dc_id):
+    _require_admin()
+    ok = db.delete_config(get_conn(), dc_id)
+    if not ok:
+        abort(404, description=f"no config for datacenter: {dc_id}")
+    return jsonify({"deleted": dc_id}), 200
 
 
 @app.get("/api/v1/hosts")
@@ -124,8 +208,15 @@ def dashboard():
     return render_template(
         "dashboard.html",
         stats=db.global_stats(conn),
-        datacenters=db.list_datacenters(conn),
+        datacenters=db.datacenters_overview(conn),
     )
+
+
+@app.get("/settings")
+def settings():
+    # The page renders empty and loads data via the API using the admin token
+    # the operator enters (kept client-side in localStorage, never in the page).
+    return render_template("settings.html")
 
 
 @app.get("/dc/<dc_id>")
@@ -161,6 +252,9 @@ def main():
     if INGEST_API_KEY == "change-me-shared-ingest-key":
         print("WARNING: using default INGEST_API_KEY; set INGEST_API_KEY in prod.",
               flush=True)
+    if ADMIN_TOKEN == "change-me-admin-token":
+        print("WARNING: using default ADMIN_TOKEN; set ADMIN_TOKEN in prod "
+              "(gates the web Settings page).", flush=True)
     app.run(host=host, port=port, debug=debug)
 
 

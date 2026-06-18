@@ -15,15 +15,20 @@ async function refresh() {
     ).join("") || '<span class="muted">—</span>';
 
     const rows = dcs.datacenters.map((dc) => {
-      const f = freshness(dc.last_seen);
+      // Configured but never reported -> pending. Disabled config -> 중지.
+      let f;
+      if (!dc.reported) f = { label: "대기중(수집 전)", cls: "pending" };
+      else if (dc.enabled === false) f = { label: "중지", cls: "stale" };
+      else f = freshness(dc.last_seen);
       const subnets = (dc.subnets || []).join(", ") || "—";
+      const lastScan = dc.reported ? relTime(dc.last_scan_finished || dc.last_seen) : "—";
       return `<tr>
         <td><a href="/dc/${encodeURIComponent(dc.id)}"><b>${esc(dc.name || dc.id)}</b></a>
             <div class="muted small">${esc(dc.id)}</div></td>
         <td>${esc(dc.location || "—")}</td>
         <td class="num">${dc.host_count}</td>
         <td class="small">${esc(subnets)}</td>
-        <td class="small">${esc(relTime(dc.last_scan_finished || dc.last_seen))}</td>
+        <td class="small">${esc(lastScan)}</td>
         <td><span class="badge ${f.cls}">${f.label}</span></td>
         <td><a class="btn" href="/dc/${encodeURIComponent(dc.id)}">조회 →</a></td>
       </tr>`;

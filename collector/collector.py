@@ -42,10 +42,58 @@ def load_config(path: str) -> dict:
     return cfg
 
 
+def fetch_remote_config(cfg: dict) -> dict | None:
+    """Pull this datacenter's scan config (subnets/interval/enabled) from the
+    portal. Returns None if unavailable so the caller can fall back to local."""
+    dc_id = cfg["datacenter"]["id"]
+    url = cfg["portal_url"].rstrip("/") + f"/api/v1/config/{dc_id}"
+    try:
+        resp = requests.get(
+            url, headers={"X-API-Key": cfg["api_key"]},
+            timeout=15, verify=cfg.get("verify_tls", True),
+        )
+        if resp.status_code == 404:
+            return None  # no web config for this DC yet
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:  # noqa: BLE001 - fall back to local config
+        print(f"  (remote config unavailable, using local: {exc})", flush=True)
+        return None
+
+
+def resolve_config(cfg: dict) -> dict:
+    """Decide effective subnets/interval/enabled: portal config wins when set."""
+    subnets = cfg.get("subnets") or []
+    interval = int(cfg.get("scan_interval_seconds", 900))
+    enabled = True
+    if cfg.get("use_remote_config", True):
+        remote = fetch_remote_config(cfg)
+        if remote is not None:
+            if remote.get("subnets"):
+                subnets = remote["subnets"]
+            interval = int(remote.get("scan_interval_seconds", interval))
+            enabled = bool(remote.get("enabled", True))
+            print(f"  using portal config: {len(subnets)} subnet(s), "
+                  f"interval={interval}s, enabled={enabled}", flush=True)
+    return {"subnets": subnets, "interval": interval, "enabled": enabled}
+
+
 def run_once(cfg: dict, *, demo: bool = False) -> dict:
-    """Scan all subnets once and push to the portal. Returns the push result."""
+    """Scan all subnets once and push to the portal. Returns the push result
+    plus the effective scan interval so a loop can honour web config changes."""
     dc = cfg["datacenter"]
-    subnets = cfg["subnets"]
+    eff = resolve_config(cfg)
+    subnets = eff["subnets"]
+
+    if not eff["enabled"]:
+        print(f"  datacenter {dc['id']} is disabled in portal config; skipping scan.",
+              flush=True)
+        return {"skipped_scan": True, "interval": eff["interval"]}
+    if not subnets:
+        print(f"  no subnets configured for {dc['id']} (set them in the web "
+              "Settings page or local config); skipping.", flush=True)
+        return {"skipped_scan": True, "interval": eff["interval"]}
+
     started = _now_iso()
     print(f"[{started}] scanning {len(subnets)} subnet(s) for {dc['id']} ...", flush=True)
 
@@ -77,6 +125,7 @@ def run_once(cfg: dict, *, demo: bool = False) -> dict:
     )
     resp.raise_for_status()
     result = resp.json()
+    result["interval"] = eff["interval"]
     print(f"  portal accepted: {result}", flush=True)
     return result
 
@@ -121,8 +170,10 @@ def main(argv=None):
     if args.interval:
         cfg["scan_interval_seconds"] = args.interval
 
-    if not cfg.get("subnets"):
-        raise SystemExit("no subnets configured (use --subnets or a config file)")
+    use_remote = cfg.get("use_remote_config", True)
+    if not cfg.get("subnets") and not use_remote:
+        raise SystemExit("no subnets configured (use --subnets, a config file, "
+                         "or the web Settings page with use_remote_config)")
 
     interval = int(cfg.get("scan_interval_seconds", 900))
 
@@ -134,10 +185,13 @@ def main(argv=None):
             return 1
         return 0
 
-    print(f"collector loop started; interval={interval}s. Ctrl-C to stop.", flush=True)
+    print(f"collector loop started; interval={interval}s "
+          f"(remote config: {use_remote}). Ctrl-C to stop.", flush=True)
     while True:
         try:
-            run_once(cfg, demo=args.demo)
+            result = run_once(cfg, demo=args.demo)
+            # Honour an interval changed from the web Settings page.
+            interval = int(result.get("interval", interval))
         except KeyboardInterrupt:
             print("stopping.", flush=True)
             return 0

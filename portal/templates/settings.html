@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}설정 · IP 관리 포탈{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>설정</h1>
+  <p class="muted">데이터센터별 스캔 대상 서브넷과 주기를 웹에서 관리합니다.
+     각 collector는 자신의 설정을 포탈에서 가져갑니다(pull).</p>
+</section>
+
+<section class="panel" id="auth-panel">
+  <div class="panel-head"><h2>관리자 인증</h2><span class="muted small" id="auth-state"></span></div>
+  <div class="form-row">
+    <label>Admin Token
+      <input type="password" id="admin-token" placeholder="ADMIN_TOKEN 값" autocomplete="off">
+    </label>
+    <button class="btn primary" id="auth-save">잠금 해제</button>
+    <button class="btn" id="auth-clear">토큰 지우기</button>
+    <span class="muted small">토큰은 브라우저(localStorage)에만 저장되며 서버 페이지에 포함되지 않습니다.</span>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>데이터센터 설정</h2>
+    <span class="muted small" id="cfg-count"></span>
+  </div>
+  <table class="grid">
+    <thead>
+      <tr><th>ID</th><th>이름</th><th>위치</th><th>서브넷</th>
+          <th>스캔주기</th><th>사용</th><th></th></tr>
+    </thead>
+    <tbody id="cfg-rows">
+      <tr><td colspan="7" class="empty">인증 후 표시됩니다.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2 id="form-title">새 데이터센터 추가</h2></div>
+  <div class="form-grid">
+    <label>ID <span class="req">*</span>
+      <input id="f-id" placeholder="dc-seoul-01">
+    </label>
+    <label>이름
+      <input id="f-name" placeholder="Seoul DC 1">
+    </label>
+    <label>위치
+      <input id="f-location" placeholder="Seoul, KR">
+    </label>
+    <label>스캔주기(초)
+      <input id="f-interval" type="number" min="30" value="900">
+    </label>
+    <label class="wide">서브넷 (한 줄에 하나 또는 콤마 구분)
+      <textarea id="f-subnets" rows="4" placeholder="10.10.0.0/24&#10;10.10.1.0/24"></textarea>
+    </label>
+    <label class="check">
+      <input id="f-enabled" type="checkbox" checked> 사용(enabled)
+    </label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" id="save-cfg">저장</button>
+    <button class="btn" id="reset-form">초기화</button>
+    <span class="muted small" id="save-msg"></span>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/common.js') }}"></script>
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+{% endblock %}
