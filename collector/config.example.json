@@ -1,0 +1,19 @@
+{
+  "datacenter": {
+    "id": "dc-seoul-01",
+    "name": "Seoul DC 1",
+    "location": "Seoul, KR"
+  },
+  "portal_url": "http://127.0.0.1:8000",
+  "api_key": "change-me-shared-ingest-key",
+
+  "use_remote_config": true,
+  "_comment": "use_remote_config=true 이면 subnets/scan_interval 을 포탈의 웹 설정에서 가져옵니다. 포탈에 설정이 없으면 아래 로컬 값으로 폴백합니다.",
+
+  "subnets": [
+    "10.10.0.0/24",
+    "10.10.1.0/24"
+  ],
+  "scan_interval_seconds": 900,
+  "verify_tls": true
+}

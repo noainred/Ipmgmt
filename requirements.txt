@@ -1,0 +1,11 @@
+# Central portal
+Flask>=3.0,<4.0
+
+# Datacenter collector (push results to the portal)
+requests>=2.31,<3.0
+
+# System dependency (NOT a pip package): nmap must be installed on each
+# collector host for OS / hostname / uptime detection.
+#   Debian/Ubuntu:  apt-get install -y nmap
+#   RHEL/CentOS:    yum install -y nmap
+# OS detection and uptime estimation require root (raw sockets).

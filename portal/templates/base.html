@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}IP 관리 포탈{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('dashboard') }}">
+      <span class="logo">◢◤</span> IP 관리 포탈
+    </a>
+    <nav>
+      <a href="{{ url_for('dashboard') }}">대시보드</a>
+      <a href="{{ url_for('settings') }}">설정</a>
+      <span class="muted">모든 데이터센터 통합 조회</span>
+    </nav>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">
+    <span class="muted">IP Management Portal · 자동 새로고침 30초</span>
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}대시보드 · IP 관리 포탈{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>통합 대시보드</h1>
+  <p class="muted">전체 데이터센터에서 수집한 사용중 IP 인벤토리</p>
+</section>
+
+<section class="stats" id="stats">
+  <div class="stat-card">
+    <div class="stat-value" id="stat-dcs">{{ stats.datacenters }}</div>
+    <div class="stat-label">데이터센터</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="stat-hosts">{{ stats.hosts }}</div>
+    <div class="stat-label">사용중 IP</div>
+  </div>
+  <div class="stat-card stat-wide">
+    <div class="stat-label">OS 분포</div>
+    <div class="os-bars" id="os-breakdown">
+      {% for o in stats.os_breakdown %}
+        <span class="os-chip" data-family="{{ o.os_family }}">{{ o.os_family }} <b>{{ o.count }}</b></span>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>데이터센터</h2>
+    <span class="muted" id="dc-updated"></span>
+  </div>
+  <table class="grid">
+    <thead>
+      <tr>
+        <th>데이터센터</th><th>위치</th><th>사용중 IP</th>
+        <th>서브넷</th><th>마지막 스캔</th><th>상태</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="dc-rows">
+      {% for dc in datacenters %}
+      <tr>
+        <td><a href="{{ url_for('datacenter_view', dc_id=dc.id) }}"><b>{{ dc.name or dc.id }}</b></a>
+            <div class="muted small">{{ dc.id }}</div></td>
+        <td>{{ dc.location or '—' }}</td>
+        <td class="num">{{ dc.host_count }}</td>
+        <td class="small">{{ dc.subnets | join(', ') if dc.subnets else '—' }}</td>
+        <td class="small ts" data-ts="{{ dc.last_scan_finished or dc.last_seen or '' }}">
+            {{ dc.last_scan_finished or dc.last_seen or '—' }}</td>
+        <td><span class="badge" data-ts="{{ dc.last_seen or '' }}">—</span></td>
+        <td><a class="btn" href="{{ url_for('datacenter_view', dc_id=dc.id) }}">조회 →</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="empty">아직 수집된 데이터가 없습니다. collector를 실행하세요.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/common.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

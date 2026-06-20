@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# App data
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+data/
+*.log
+
+# Local config (contains API keys / secrets)
+collector/config.json
+portal/.env
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
