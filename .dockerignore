@@ -1,0 +1,12 @@
+.git
+**/__pycache__
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+data/
+*.log
+.venv
+venv
+deploy/.env
+deploy/certs

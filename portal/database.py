@@ -1,37 +1,110 @@
-"""SQLite storage for the central portal.
+"""Storage layer for the central portal -- SQLite or PostgreSQL.
 
-Two tables:
-  * datacenters -- one row per collector, with last-seen / last-scan metadata.
+Backend is chosen at connect() time from the DSN:
+  * a postgres URL ("postgresql://..." / "postgres://...") -> PostgreSQL (psycopg3)
+  * anything else                                          -> SQLite file path
+
+Both share one set of query helpers. A thin `Database` wrapper hides the two
+differences that actually matter for this app:
+  * paramstyle: helpers are written with "?"; for postgres we rewrite to "%s".
+  * autoincrement PK type in the schema.
+
+Tables:
+  * datacenters -- observed state, one row per collector (last-seen / last-scan).
   * hosts       -- one row per (datacenter, ip), upserted on every ingest.
+  * dc_config   -- desired config managed from the web Settings page; the
+                   source of truth collectors pull from.
 
-SQLite in WAL mode comfortably handles periodic batch writes from 20+ collectors
-plus the read-heavy dashboard. Swap the connection factory for Postgres later
-without touching the query helpers' signatures.
+SQLite (WAL) is great for dev and small deployments. PostgreSQL is recommended
+for 20+ datacenters in production (concurrent writers, HA, history).
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 _LOCK = threading.Lock()
+
+_PG_PREFIXES = ("postgresql://", "postgres://", "postgresql+psycopg://")
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+def is_postgres_dsn(dsn: str) -> bool:
+    return isinstance(dsn, str) and dsn.startswith(_PG_PREFIXES)
 
 
-SCHEMA = """
+class Database:
+    """Minimal connection wrapper that unifies SQLite and PostgreSQL access."""
+
+    def __init__(self, dsn: str):
+        if is_postgres_dsn(dsn):
+            import psycopg  # lazy: only required when actually using postgres
+            from psycopg.rows import dict_row
+
+            # psycopg accepts the URL as-is (strip the SQLAlchemy-style suffix).
+            conninfo = dsn.replace("postgresql+psycopg://", "postgresql://")
+            self.backend = "postgres"
+            self.conn = psycopg.connect(conninfo, autocommit=True, row_factory=dict_row)
+        else:
+            self.backend = "sqlite"
+            self.conn = sqlite3.connect(dsn, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.execute("PRAGMA busy_timeout=5000")
+
+    def execute(self, sql: str, params=()):
+        if self.backend == "postgres":
+            sql = sql.replace("?", "%s")
+            return self.conn.execute(sql, params or None)
+        return self.conn.execute(sql, params)
+
+    def commit(self):
+        # postgres connection is autocommit; only sqlite needs an explicit commit.
+        if self.backend == "sqlite":
+            self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """Atomic multi-statement block (used by ingest)."""
+        if self.backend == "postgres":
+            with self.conn.transaction():
+                yield
+        else:
+            try:
+                yield
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def init(self):
+        ddl = _schema_for(self.backend)
+        with _LOCK:
+            for stmt in (s.strip() for s in ddl.split(";")):
+                if stmt:
+                    self.conn.execute(stmt)
+            self.commit()
+
+
+def connect(dsn: str) -> Database:
+    return Database(dsn)
+
+
+# --------------------------------------------------------------------------- #
+# Schema
+# --------------------------------------------------------------------------- #
+def _schema_for(backend: str) -> str:
+    # Only the auto-increment PK type differs between the two engines.
+    serial_pk = "BIGSERIAL PRIMARY KEY" if backend == "postgres" \
+        else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    return f"""
 CREATE TABLE IF NOT EXISTS datacenters (
     id            TEXT PRIMARY KEY,
     name          TEXT,
@@ -39,12 +112,12 @@ CREATE TABLE IF NOT EXISTS datacenters (
     last_seen     TEXT,
     last_scan_started  TEXT,
     last_scan_finished TEXT,
-    subnets       TEXT,        -- JSON array of CIDRs from the latest scan
+    subnets       TEXT,
     host_count    INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS hosts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            {serial_pk},
     datacenter_id TEXT NOT NULL REFERENCES datacenters(id) ON DELETE CASCADE,
     ip            TEXT NOT NULL,
     status        TEXT,
@@ -56,7 +129,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     os_accuracy   INTEGER,
     uptime_seconds INTEGER,
     last_boot     TEXT,
-    open_ports    TEXT,        -- JSON array of ints
+    open_ports    TEXT,
     subnet        TEXT,
     first_seen    TEXT,
     last_seen     TEXT,
@@ -68,35 +141,30 @@ CREATE INDEX IF NOT EXISTS idx_hosts_family   ON hosts(os_family);
 CREATE INDEX IF NOT EXISTS idx_hosts_subnet   ON hosts(subnet);
 CREATE INDEX IF NOT EXISTS idx_hosts_lastseen ON hosts(last_seen);
 
--- Desired configuration, managed from the web Settings page. This is the
--- source of truth that collectors pull from (separate from the observed
--- `datacenters` state that ingest writes).
 CREATE TABLE IF NOT EXISTS dc_config (
     id            TEXT PRIMARY KEY,
     name          TEXT,
     location      TEXT,
-    subnets       TEXT,        -- JSON array of CIDRs to scan
+    subnets       TEXT,
     scan_interval_seconds INTEGER DEFAULT 900,
     enabled       INTEGER DEFAULT 1,
     updated_at    TEXT
-);
+)
 """
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    with _LOCK:
-        conn.executescript(SCHEMA)
-        conn.commit()
+def init_db(conn: Database) -> None:
+    conn.init()
 
 
 # --------------------------------------------------------------------------- #
 # Ingest
 # --------------------------------------------------------------------------- #
-def ingest(conn: sqlite3.Connection, datacenter: dict, scan: dict, hosts: list[dict]) -> dict:
+def ingest(conn: Database, datacenter: dict, scan: dict, hosts: list[dict]) -> dict:
     """Upsert a datacenter and its host records from one collector push."""
     now = _now_iso()
     dc_id = datacenter["id"]
-    with _LOCK:
+    with _LOCK, conn.transaction():
         conn.execute(
             """
             INSERT INTO datacenters (id, name, location, last_seen,
@@ -163,14 +231,13 @@ def ingest(conn: sqlite3.Connection, datacenter: dict, scan: dict, hosts: list[d
                     now,
                 ),
             )
-        conn.commit()
     return {"datacenter": dc_id, "hosts_ingested": len(hosts)}
 
 
 # --------------------------------------------------------------------------- #
 # Queries
 # --------------------------------------------------------------------------- #
-def _row_to_host(row: sqlite3.Row) -> dict:
+def _row_to_host(row) -> dict:
     d = dict(row)
     try:
         d["open_ports"] = json.loads(d.get("open_ports") or "[]")
@@ -179,26 +246,7 @@ def _row_to_host(row: sqlite3.Row) -> dict:
     return d
 
 
-def list_datacenters(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM datacenters ORDER BY id"
-    ).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        try:
-            d["subnets"] = json.loads(d.get("subnets") or "[]")
-        except (TypeError, ValueError):
-            d["subnets"] = []
-        out.append(d)
-    return out
-
-
-def get_datacenter(conn: sqlite3.Connection, dc_id: str) -> dict | None:
-    row = conn.execute("SELECT * FROM datacenters WHERE id=?", (dc_id,)).fetchone()
-    if not row:
-        return None
-    d = dict(row)
+def _decode_subnets(d: dict) -> dict:
     try:
         d["subnets"] = json.loads(d.get("subnets") or "[]")
     except (TypeError, ValueError):
@@ -206,8 +254,18 @@ def get_datacenter(conn: sqlite3.Connection, dc_id: str) -> dict | None:
     return d
 
 
+def list_datacenters(conn: Database) -> list[dict]:
+    rows = conn.execute("SELECT * FROM datacenters ORDER BY id").fetchall()
+    return [_decode_subnets(dict(r)) for r in rows]
+
+
+def get_datacenter(conn: Database, dc_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM datacenters WHERE id=?", (dc_id,)).fetchone()
+    return _decode_subnets(dict(row)) if row else None
+
+
 def query_hosts(
-    conn: sqlite3.Connection,
+    conn: Database,
     *,
     datacenter_id: str | None = None,
     os_family: str | None = None,
@@ -241,41 +299,43 @@ def query_hosts(
     return [_row_to_host(r) for r in rows]
 
 
-def count_hosts(conn: sqlite3.Connection, **filters) -> int:
-    # Mirror query_hosts filters for an accurate total (without limit/offset).
+def count_hosts(conn: Database, **filters) -> int:
     clauses = []
     params: list = []
-    for col, key in (("datacenter_id", "datacenter_id"),
-                     ("os_family", "os_family"),
-                     ("subnet", "subnet")):
+    for key in ("datacenter_id", "os_family", "subnet"):
         if filters.get(key):
-            clauses.append(f"{col} = ?")
+            clauses.append(f"{key} = ?")
             params.append(filters[key])
     if filters.get("search"):
         like = f"%{filters['search']}%"
         clauses.append("(ip LIKE ? OR hostname LIKE ? OR os_name LIKE ?)")
         params += [like, like, like]
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    return conn.execute("SELECT COUNT(*) FROM hosts" + where, params).fetchone()[0]
+    row = conn.execute("SELECT COUNT(*) AS n FROM hosts" + where, params).fetchone()
+    return dict(row)["n"]
 
 
-def os_family_breakdown(conn: sqlite3.Connection, datacenter_id: str | None = None) -> list[dict]:
+def os_family_breakdown(conn: Database, datacenter_id: str | None = None) -> list[dict]:
     if datacenter_id:
         rows = conn.execute(
-            "SELECT os_family, COUNT(*) c FROM hosts WHERE datacenter_id=? "
+            "SELECT os_family, COUNT(*) AS c FROM hosts WHERE datacenter_id=? "
             "GROUP BY os_family ORDER BY c DESC",
             (datacenter_id,),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT os_family, COUNT(*) c FROM hosts GROUP BY os_family ORDER BY c DESC"
+            "SELECT os_family, COUNT(*) AS c FROM hosts GROUP BY os_family ORDER BY c DESC"
         ).fetchall()
-    return [{"os_family": r[0] or "Unknown", "count": r[1]} for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        out.append({"os_family": d.get("os_family") or "Unknown", "count": d["c"]})
+    return out
 
 
-def global_stats(conn: sqlite3.Connection) -> dict:
-    total_hosts = conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
-    total_dcs = conn.execute("SELECT COUNT(*) FROM datacenters").fetchone()[0]
+def global_stats(conn: Database) -> dict:
+    total_hosts = dict(conn.execute("SELECT COUNT(*) AS n FROM hosts").fetchone())["n"]
+    total_dcs = dict(conn.execute("SELECT COUNT(*) AS n FROM datacenters").fetchone())["n"]
     return {
         "datacenters": total_dcs,
         "hosts": total_hosts,
@@ -286,28 +346,24 @@ def global_stats(conn: sqlite3.Connection) -> dict:
 # --------------------------------------------------------------------------- #
 # Datacenter configuration (managed from the web Settings page)
 # --------------------------------------------------------------------------- #
-def _row_to_config(row: sqlite3.Row) -> dict:
-    d = dict(row)
-    try:
-        d["subnets"] = json.loads(d.get("subnets") or "[]")
-    except (TypeError, ValueError):
-        d["subnets"] = []
+def _row_to_config(row) -> dict:
+    d = _decode_subnets(dict(row))
     d["enabled"] = bool(d.get("enabled", 1))
     return d
 
 
-def list_configs(conn: sqlite3.Connection) -> list[dict]:
+def list_configs(conn: Database) -> list[dict]:
     rows = conn.execute("SELECT * FROM dc_config ORDER BY id").fetchall()
     return [_row_to_config(r) for r in rows]
 
 
-def get_config(conn: sqlite3.Connection, dc_id: str) -> dict | None:
+def get_config(conn: Database, dc_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM dc_config WHERE id=?", (dc_id,)).fetchone()
     return _row_to_config(row) if row else None
 
 
 def upsert_config(
-    conn: sqlite3.Connection,
+    conn: Database,
     dc_id: str,
     *,
     name: str | None = None,
@@ -345,14 +401,14 @@ def upsert_config(
     return get_config(conn, dc_id)
 
 
-def delete_config(conn: sqlite3.Connection, dc_id: str) -> bool:
+def delete_config(conn: Database, dc_id: str) -> bool:
     with _LOCK:
         cur = conn.execute("DELETE FROM dc_config WHERE id=?", (dc_id,))
         conn.commit()
     return cur.rowcount > 0
 
 
-def datacenters_overview(conn: sqlite3.Connection) -> list[dict]:
+def datacenters_overview(conn: Database) -> list[dict]:
     """Merge desired config with observed state for the dashboard.
 
     A datacenter may be configured but not yet reported (pending), reported but

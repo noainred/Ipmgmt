@@ -4,6 +4,11 @@ Flask>=3.0,<4.0
 # Datacenter collector (push results to the portal)
 requests>=2.31,<3.0
 
+# PostgreSQL backend (optional; SQLite needs no extra package).
+# Set DATABASE_URL=postgresql://... to use it.  For production deploys use
+# deploy/requirements-portal.txt (Flask + gunicorn + psycopg).
+# psycopg[binary]>=3.1
+
 # System dependency (NOT a pip package): nmap must be installed on each
 # collector host for OS / hostname / uptime detection.
 #   Debian/Ubuntu:  apt-get install -y nmap

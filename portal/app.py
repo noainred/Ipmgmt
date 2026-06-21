@@ -27,15 +27,16 @@ from flask import Flask, abort, g, jsonify, render_template, request
 from common.hostrecord import format_uptime, normalize_host
 from portal import database as db
 
-DB_PATH = os.environ.get("PORTAL_DB", "portal.db")
+DB_DSN = os.environ.get("DATABASE_URL") or os.environ.get("PORTAL_DB", "portal.db")
 INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "change-me-shared-ingest-key")
 # Separate token that gates write access to the web Settings page / config API.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "change-me-admin-token")
 
 app = Flask(__name__)
 
-# One shared connection (SQLite + WAL + module-level lock handles concurrency).
-_conn = db.connect(DB_PATH)
+# One shared connection per process (SQLite WAL + lock, or autocommit psycopg).
+# Under gunicorn each worker process gets its own connection.
+_conn = db.connect(DB_DSN)
 db.init_db(_conn)
 
 
@@ -248,7 +249,7 @@ def main():
     port = int(os.environ.get("PORT", 8000))
     host = os.environ.get("HOST", "0.0.0.0")
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    print(f"portal on http://{host}:{port}  (db={DB_PATH})", flush=True)
+    print(f"portal on http://{host}:{port}  (db={_conn.backend}: {DB_DSN})", flush=True)
     if INGEST_API_KEY == "change-me-shared-ingest-key":
         print("WARNING: using default INGEST_API_KEY; set INGEST_API_KEY in prod.",
               flush=True)
