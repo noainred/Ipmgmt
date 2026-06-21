@@ -33,7 +33,8 @@
 | `collector/scanner.py`   | nmap 래퍼. 서브넷 스캔 → OS/호스트명/uptime/포트 추출 (+데모 모드) |
 | `collector/collector.py` | DC 안에서 주기적으로 스캔 후 포탈로 push. **설정(서브넷·주기)은 포탈에서 pull** |
 | `portal/app.py`          | Flask: ingest API + 조회 API + **설정 API** + 웹 UI |
-| `portal/database.py`     | SQLite 저장소 (datacenters, hosts, **dc_config**) |
+| `portal/database.py`     | 저장소 (datacenters, hosts, **dc_config**) — **SQLite/PostgreSQL 양쪽 지원** |
+| `deploy/`                | 프로덕션 배포: Dockerfile, docker-compose(PG+gunicorn+nginx), systemd 유닛 |
 | `portal/templates/`,`static/` | 대시보드 / DC 상세 / **설정** 웹 페이지 |
 | `common/hostrecord.py`   | collector·portal 공용 호스트 레코드 스키마 |
 
@@ -65,8 +66,18 @@ export PORT=8000
 python -m portal.app
 ```
 
-> 운영에서는 reverse proxy(nginx) + TLS 뒤에 두고, `gunicorn -w 4 'portal.app:app'`
-> 같은 WSGI 서버로 띄우는 것을 권장합니다.
+**저장소 선택 (SQLite ↔ PostgreSQL)**
+
+- 기본은 SQLite(`PORTAL_DB` 파일). 데모·소규모에 충분합니다.
+- 20+ DC 프로덕션은 **PostgreSQL** 권장 — `DATABASE_URL` 만 주면 됩니다:
+  ```bash
+  export DATABASE_URL="postgresql://ipm:비밀번호@db-host:5432/ipmgmt"
+  ```
+  `DATABASE_URL` 이 있으면 Postgres, 없으면 `PORTAL_DB`(SQLite)를 사용합니다.
+
+> 운영에서는 reverse proxy(nginx) + TLS 뒤에서 gunicorn으로 띄웁니다. 완성된
+> **Docker Compose(PostgreSQL+gunicorn+nginx)** 와 **collector systemd 유닛**은
+> [`deploy/`](deploy/README.md) 에 있습니다 — `cd deploy && docker compose up -d --build`.
 
 ### 2) 데이터센터마다 collector 실행
 

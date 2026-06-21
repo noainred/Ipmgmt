@@ -1,0 +1,37 @@
+# systemd unit for a datacenter collector.
+#
+# Install on each datacenter host (one per DC):
+#   1) deploy the repo to /opt/Ipmgmt and install deps:
+#        apt-get install -y python3 python3-pip nmap
+#        pip3 install requests
+#   2) create /opt/Ipmgmt/collector/config.json from config.example.json
+#      (set datacenter.id, portal_url, api_key; subnets can come from the web
+#       Settings page when use_remote_config=true)
+#   3) install the unit:
+#        cp deploy/ipmgmt-collector.service /etc/systemd/system/
+#        systemctl daemon-reload
+#        systemctl enable --now ipmgmt-collector
+#        journalctl -u ipmgmt-collector -f
+#
+# The collector runs its own scan loop (no timer needed). OS detection and
+# uptime estimation need raw sockets -> root + CAP_NET_RAW/CAP_NET_ADMIN.
+[Unit]
+Description=IP management datacenter collector (subnet scan -> portal push)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/Ipmgmt
+ExecStart=/usr/bin/python3 -m collector.collector --config /opt/Ipmgmt/collector/config.json
+Restart=always
+RestartSec=30
+# Required for nmap OS/uptime detection (raw packets):
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+# Hardening (relaxed enough to keep raw sockets working):
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
